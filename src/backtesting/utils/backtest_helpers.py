@@ -74,118 +74,69 @@ def load_stock_data(stock_data_file):
     
     return stock_data
 
-def calculate_limstop_value(data, limit, stop, category):
-    """
-    Vectorized version to simulate limit/stop behavior.
-    For each row, return the first value where limit or stop is triggered, else return the Day 20 value.
-    """
-    # Select numeric columns (assuming they are labeled 'Day X Stock')
-    day_columns = [col for col in data.columns if col.startswith('Day')]
-    numeric_data = data[day_columns].apply(pd.to_numeric, errors='coerce')  # Convert to numeric, coercing errors
-
-    # Create boolean masks for where limit/stop is triggered
-    limit_hit = (numeric_data >= limit).idxmax(axis=1)  # First occurrence where limit is hit
-    stop_hit = (numeric_data <= stop).idxmax(axis=1)    # First occurrence where stop is hit
-
-    # Ensure 'limit_hit' and 'stop_hit' are numeric
-    limit_hit = pd.to_numeric(limit_hit, errors='coerce')
-    stop_hit = pd.to_numeric(stop_hit, errors='coerce')
-
-    # Create a dataframe to store when limit or stop occurs
-    result = pd.DataFrame({'limit_hit': limit_hit, 'stop_hit': stop_hit})
-
-    # Determine which comes first, limit or stop
-    result['first_hit'] = result[['limit_hit', 'stop_hit']].min(axis=1, skipna=True)
-
-    # If neither limit nor stop was hit before Day 20, use Day 20 value
-    day_20_value = numeric_data[f'Day 20 {category}']
-
-    # Handle the selection: if first hit occurs before Day 20, use that; otherwise, use Day 20
-    condition_first_hit = result['first_hit'].notna() & (result['first_hit'] > 0) & (result['first_hit'] <= 20)  # A hit occurred before Day 20
-
-    # Replacing the deprecated 'lookup' with apply and lambda to fetch the correct values
-    return_data = pd.Series(
-        np.where(
-            condition_first_hit,
-            result.apply(lambda row: numeric_data.loc[row.name, f'Day {int(row.first_hit)} {category}'] if pd.notna(row.first_hit) else day_20_value[row.name], axis=1),
-            day_20_value
-        )
-    )
-
-    return return_data
-
-
-
-
-def extract_mean_return_alpha(df, stock_data, day=20, limit=None, stop=None):
-    """
-    Optimized version to extract raw mean and limstop mean return/alpha.
-    """
-    # Filter stock data based on tickers present in the input dataframe
-    returns_df = stock_data['Returns']
-    alpha_df = stock_data['Alpha']
-    
-    # Get raw values for Day 20
-    raw_returns = returns_df[f'Day {day} Stock']
-    raw_alpha = alpha_df[f'Day {day} Alpha']
-    
-    # If no limit or stop is provided, just return the raw means
-    if limit is None or stop is None:
-        return raw_returns.mean(), raw_alpha.mean()
-
-    # Limit/Stop Simulation: Use the vectorized limit/stop calculation
-    limstop_returns = calculate_limstop_value(returns_df, limit, stop, 'Stock')
-    limstop_alpha = calculate_limstop_value(alpha_df, limit, stop, 'Alpha')
-
-    return limstop_returns.mean(), limstop_alpha.mean()
-
-
 def process_prediction_pair(args):
     """Process a single prediction-gt pair in parallel."""
-    df, model_name, target_name, column_pair, limit_array, stop_array, stock_data = args
-    pred_col, gt_col = column_pair
+    df, stock_data, model_name, pred_col, gt_col = args
     results = []
 
-    # Ensure both prediction and GT columns are binary
+    # Ensure both prediction and GT columns are binary (threshold float columns if necessary)
     if not is_binary(df[pred_col]):
         df[pred_col] = threshold_binary(df[pred_col])
     if not is_binary(df[gt_col]):
         df[gt_col] = threshold_binary(df[gt_col])
 
-    # For each limit/stop combination
-    for limit_val, stop_val in zip(limit_array, stop_array):
-        # Compute raw means for prediction (filtered by Pred = 1)
-        raw_mean_return_1m, raw_mean_alpha_1m = extract_mean_return_alpha(df[df[pred_col] == 1], stock_data, day=20)
-        
-        # Compute limstop means for prediction (filtered by Pred = 1)
-        limstop_mean_return_1m, limstop_mean_alpha_1m = extract_mean_return_alpha(df[df[pred_col] == 1], stock_data, day=20, limit=limit_val, stop=stop_val)
+    # Get the signal name by removing the "Pred_" or "GT_" part
+    signal = pred_col.replace("Pred_", "").replace("GT_", "")
+    
+    # If the signal contains '_stop_', invert the boolean values
+    if '_stop_' in signal:
+        df[pred_col] = 1 - df[pred_col]  # Invert prediction values
+        df[gt_col] = 1 - df[gt_col]  # Invert ground truth values
 
-        # Compute raw means for GT (filtered by GT = 1)
-        raw_gt_mean_return_1m, raw_gt_mean_alpha_1m = extract_mean_return_alpha(df[df[gt_col] == 1], stock_data, day=20)
+    # Filter by the prediction signal being 1
+    pred_filter = df[df[pred_col] == 1]['Ticker']
+    
+    # Filter by the GT signal being 1
+    gt_filter = df[df[gt_col] == 1]['Ticker']
 
-        # Compute limstop means for GT (filtered by GT = 1)
-        limstop_gt_mean_return_1m, limstop_gt_mean_alpha_1m = extract_mean_return_alpha(df[df[gt_col] == 1], stock_data, day=20, limit=limit_val, stop=stop_val)
+    # Load the stock data for Day 20
+    returns_df = stock_data['Returns']
+    alpha_df = stock_data['Alpha']
+    
+    # Filter stock data based on the tickers in the prediction and GT signals
+    pred_returns = returns_df.loc[pred_filter, 'Day 20 Stock']
+    pred_alphas = alpha_df.loc[pred_filter, 'Day 20 Alpha']
+    gt_returns = returns_df.loc[gt_filter, 'Day 20 Stock']
+    gt_alphas = alpha_df.loc[gt_filter, 'Day 20 Alpha']
 
-        result = {
-            'Model': model_name,
-            'Prediction': target_name,
-            'Limit': limit_val,
-            'Stop': stop_val,
-            'raw pred mean return 1m': raw_mean_return_1m,
-            'raw pred mean alpha 1m': raw_mean_alpha_1m,
-            'limstop pred mean return 1m': limstop_mean_return_1m,
-            'limstop pred mean alpha 1m': limstop_mean_alpha_1m,
-            'raw GT mean return 1m': raw_gt_mean_return_1m,
-            'raw GT mean alpha 1m': raw_gt_mean_alpha_1m,
-            'limstop GT mean return 1m': limstop_gt_mean_return_1m,
-            'limstop GT mean alpha 1m': limstop_gt_mean_alpha_1m
-        }
+    # Calculate mean return and alpha for both pred and gt
+    mean_pred_return = pred_returns.mean() if not pred_returns.empty else np.nan
+    mean_pred_alpha = pred_alphas.mean() if not pred_alphas.empty else np.nan
+    mean_gt_return = gt_returns.mean() if not gt_returns.empty else np.nan
+    mean_gt_alpha = gt_alphas.mean() if not gt_alphas.empty else np.nan
 
-        results.append(result)
+    # Calculate mean return and alpha for both pred and gt
+    median_pred_return = pred_returns.median() if not pred_returns.empty else np.nan
+    median_pred_alpha = pred_alphas.median() if not pred_alphas.empty else np.nan
+    median_gt_return = gt_returns.median() if not gt_returns.empty else np.nan
+    median_gt_alpha = gt_alphas.median() if not gt_alphas.empty else np.nan
+
+    result = {
+        'Model': model_name,
+        'Signal': signal,
+        'Mean_Pred_Return (in %)': np.round(mean_pred_return*100,2),
+        'Median_Pred_Return (in %)': np.round(median_pred_return*100,2),
+        'Mean_Pred_Alpha (in %)': np.round(mean_pred_alpha*100,2),
+        'Median_Pred_Alpha (in %)': np.round(median_pred_alpha*100,2),
+        'Mean_GT_Return (in %)': np.round(mean_gt_return*100,2),
+        'Median_GT_Return (in %)': np.round(median_gt_return*100,2),
+        'Mean_GT_Alpha (in %)': np.round(mean_gt_alpha*100,2),
+        'Median_GT_Alpha (in %)': np.round(median_gt_alpha*100,2)
+    }
+
+    results.append(result)
 
     return results
-
-
 
 def save_results(all_results, output_file):
     """Save all the backtest results into a single Excel file."""
