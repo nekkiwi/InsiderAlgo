@@ -190,5 +190,6 @@ def process_prediction_pair(args):
 def save_results(all_results, output_file):
     """Save all the backtest results into a single Excel file."""
     final_df = pd.DataFrame(all_results)
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
     final_df.to_excel(output_file, index=False)
     print(f"- Backtest results saved to {output_file}")
